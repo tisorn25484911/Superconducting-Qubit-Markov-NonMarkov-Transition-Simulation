@@ -39,7 +39,45 @@ from dynamical import (
 # ──────────────────────────────────────────────────────────────────────────────
 #  Shared time axis (μs)
 # ──────────────────────────────────────────────────────────────────────────────
-TLIST = np.linspace(0, 10, 400)
+TLIST = np.linspace(0, 12, 400)
+
+C_RECORD = 0.8   # concurrence threshold: recording / N-counting starts here
+
+
+def _trim_to_c_start(conc, tlist, c_start=C_RECORD, nth=3):
+    """
+    Trim a concurrence time series so that the analysis window begins at the
+    nth downward crossing of c_start (C transitions from above to at/below).
+
+    The returned time axis is shifted so that trimmed point = t 0.
+    If there are fewer than nth crossings the last crossing is used.
+    If C never reaches c_start the original arrays are returned unchanged.
+
+    Parameters
+    ----------
+    conc    : array-like   — concurrence values
+    tlist   : array-like   — corresponding time points (μs)
+    c_start : float        — threshold (default C_RECORD = 0.8)
+    nth     : int          — which downward crossing to trim from (default 3)
+
+    Returns
+    -------
+    t_trim   : np.ndarray
+    conc_trim: np.ndarray
+    """
+    conc_arr = np.asarray(conc, dtype=float)
+    t_arr    = np.asarray(tlist, dtype=float)
+
+    # Collect indices of downward crossings: C[i-1] > c_start and C[i] <= c_start
+    crossings = [i for i in range(1, len(conc_arr))
+                 if conc_arr[i - 1] > c_start and conc_arr[i] <= c_start]
+
+    if len(crossings) == 0:
+        return t_arr, conc_arr
+
+    # Use nth crossing (1-indexed); fall back to the last one if not enough
+    idx = crossings[nth - 1] if len(crossings) >= nth else crossings[-1]
+    return t_arr[idx:] - t_arr[idx], conc_arr[idx:]
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Experiment 1 — Markovian baseline
@@ -64,15 +102,19 @@ def exp1(params=None, tlist=None, plot=True):
 
     T2Q    = params.get("T2Q", DEFAULT_PARAMS["T2Q"])
     T2A    = params.get("T2A", DEFAULT_PARAMS["T2A"])
+    #T1Q = params.get("T1Q", DEFAULT_PARAMS["T1Q"])
+    #T1A = params.get("T1A", DEFAULT_PARAMS["T1A"])
     Om_QA  = params.get("Om_QA", DEFAULT_PARAMS["Om_QA"])
     Gamma0 = 1.0 / T2Q + 1.0 / T2A
 
     # 2-qubit system: Q and A only, no E
     I2  = qt.qeye(2)
     sp2 = qt.sigmap(); sm2 = qt.sigmam(); sz2 = qt.sigmaz()
-    H_2q  = Om_QA * (qt.tensor(sp2, sm2) + qt.tensor(sm2, sp2))
-    c_Q2  = np.sqrt(1.0 / T2Q) * qt.tensor(sz2, I2)
-    c_A2  = np.sqrt(1.0 / T2A) * qt.tensor(I2, sz2)
+    H_2q  = Om_QA/2 * (qt.tensor(sp2, sm2) + qt.tensor(sm2, sp2))
+    c_Q2  = np.sqrt(1.0 / (2*T2Q)) * qt.tensor(sz2, I2)
+    c_A2  = np.sqrt(1.0 / (2*T2A)) * qt.tensor(I2, sz2)
+    #c_Q1 = np.sqrt(1.0 / T1Q) * qt.tensor(sm2, I2)
+    #c_A1 = np.sqrt(1.0 / T1A) * qt.tensor(I2, sm2)
     rho0  = qt.ket2dm(qt.bell_state('10'))
 
     result = qt.mesolve(
@@ -83,15 +125,23 @@ def exp1(params=None, tlist=None, plot=True):
     conc          = [qt.concurrence(s) for s in result.states]
     C0            = conc[0]
     conc_analytic = C0 * np.exp(-tlist / T2Q - tlist / T2A)
-    NM            = nm_measure(conc, tlist)
+
+    # Trim both series using the simulation's crossing index so lengths match
+    conc_arr  = np.asarray(conc, dtype=float)
+    below     = np.where(conc_arr <= C_RECORD)[0]
+    trim_idx  = below[0] if len(below) > 0 else 0
+    t_trim        = np.asarray(tlist)[trim_idx:] - tlist[trim_idx]
+    conc_trim     = conc_arr[trim_idx:]
+    analytic_trim = np.asarray(conc_analytic)[trim_idx:]
+    NM = nm_measure(conc_trim, t_trim)
 
     if plot:
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(tlist, conc,           lw=2,   color='navy',
+        ax.plot(t_trim, conc_trim,     lw=2,   color='navy',
                 label='mesolve (numerical)')
-        ax.plot(tlist, conc_analytic,  lw=1.5, color='red', ls='--',
+        ax.plot(t_trim, analytic_trim, lw=1.5, color='red', ls='--',
                 label=r'$C_0\,e^{-t/T_{2Q} - t/T_{2A}}$ (analytic)')
-        ax.set(xlabel='Time (μs)', ylabel='Concurrence  C',
+        ax.set(xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
                title='Exp.1 — Markovian baseline: monotonic exponential decay',
                ylim=[-0.02, 1.05])
         ax.legend()
@@ -103,8 +153,8 @@ def exp1(params=None, tlist=None, plot=True):
     print(f"[Exp.1]  C₀={C0:.4f}  C(10μs)={conc[-1]:.4f}  "
           f"N={NM:.4f}  Γ₀={Gamma0:.5f} μs⁻¹")
     return {
-        'tlist': tlist, 'conc': conc,
-        'conc_analytic': conc_analytic,
+        'tlist': t_trim, 'conc': conc_trim,
+        'conc_analytic': analytic_trim,
         'NM': NM, 'T2Q': T2Q, 'T2A': T2A, 'Gamma0': Gamma0,
     }
 
@@ -132,23 +182,29 @@ def exp2(params=None, tlist=None, plot=True, baseline=None):
         tlist = TLIST
 
     t, states, conc = evolve_lindblad(params, gamma_E=0.0, tlist=tlist)
-    NM  = nm_measure(conc, t)
-    dC  = np.gradient(np.array(conc), t[1] - t[0])
+
+    # Trim to start when C first reaches C_RECORD (t relabeled 0)
+    t_trim, conc_trim = _trim_to_c_start(conc, t)
+    NM  = nm_measure(conc_trim, t_trim)
+    dC  = np.gradient(np.array(conc_trim), t_trim[1] - t_trim[0])
 
     if plot:
         fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 
         ax = axes[0]
         if baseline is not None:
-            ax.plot(tlist, baseline, color='gray', lw=1.5, ls='--', alpha=0.7,
-                    label='Exp.1 (Markovian baseline)')
-            ax.fill_between(tlist,
-                            np.array(conc), np.array(baseline),
-                            where=np.array(conc) > np.array(baseline),
+            _n  = min(len(t_trim), len(baseline))
+            _tb = t_trim[:_n]
+            _b  = np.array(baseline)[:_n]
+            _c  = np.array(conc_trim)[:_n]
+            ax.plot(_tb, _b, color='gray', lw=1.5,
+                    ls='--', alpha=0.7, label='Exp.1 (Markovian baseline)')
+            ax.fill_between(_tb, _c, _b,
+                            where=_c > _b,
                             alpha=0.25, color='limegreen', label='Revival region')
-        ax.plot(t, conc, color='steelblue', lw=2,
+        ax.plot(t_trim, conc_trim, color='steelblue', lw=2,
                 label=f'Exp.2 (γ_E = 0,  N = {NM:.3f})')
-        ax.set(xlabel='Time (μs)', ylabel='Concurrence  C',
+        ax.set(xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
                title='Exp.2 — Non-Markovian: concurrence revival',
                ylim=[-0.02, 1.05])
         ax.legend(fontsize=9)
@@ -157,22 +213,22 @@ def exp2(params=None, tlist=None, plot=True, baseline=None):
                 color='darkgreen', fontweight='bold')
 
         ax = axes[1]
-        ax.plot(t, dC, color='darkred', lw=1.5)
-        ax.fill_between(t, dC, 0, where=dC > 0,
-                        alpha=0.4, color='limegreen',
-                        label=f'Positive area = N = {NM:.3f}')
-        ax.fill_between(t, dC, 0, where=dC < 0,
-                        alpha=0.15, color='red', label='Negative (decay)')
+        ax.plot(t_trim, dC, color='darkred', lw=1.5)
+        ax.fill_between(t_trim, dC, 0, where=dC > 0,
+                        alpha=0.4, color='limegreen')
+        ax.fill_between(t_trim, dC, 0, where=dC < 0,
+                        alpha=0.15, color='red')
         ax.axhline(0, color='black', lw=0.8)
-        ax.set(xlabel='Time (μs)', ylabel='dC/dt',
-               title='Rate of change — positive = info backflow from E')
+        ax.set(xlabel=f'Time since C={C_RECORD} (μs)', ylabel='dC/dt',
+               title='Rate of change = info backflow from E')
         ax.legend(fontsize=9)
         axes[0].grid(True)
         ax.grid(True)
         plt.tight_layout(); plt.show()
 
     print(f"[Exp.2]  N = {NM:.4f}  (paper reports ~1.4)")
-    return {'tlist': t, 'conc': conc, 'NM': NM, 'states': states, 'dC_dt': dC}
+    return {'tlist': t_trim, 'conc': conc_trim,
+            'NM': NM, 'states': states, 'dC_dt': dC}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -196,16 +252,17 @@ def exp3(params=None, tlist=None, gamma_scan=None, plot=True):
     if tlist is None:
         tlist = TLIST
     if gamma_scan is None:
-        gamma_scan = [0.0, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+        gamma_scan = [0.0, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 20.0]
 
     all_conc = {}
     all_NM   = {}
 
     for g in gamma_scan:
         print(f"  Scanning γ_E = {g:.2f} rad/μs ...", end=' ', flush=True)
-        t, _, conc  = evolve_lindblad(params, gamma_E=g, tlist=tlist)
-        all_conc[g] = conc
-        all_NM[g]   = nm_measure(conc, t)
+        t, _, conc        = evolve_lindblad(params, gamma_E=g, tlist=tlist)
+        t_tr, conc_tr     = _trim_to_c_start(conc, t)
+        all_conc[g]       = (t_tr, conc_tr)   # store trimmed pair
+        all_NM[g]         = nm_measure(conc_tr, t_tr)
         print(f"N = {all_NM[g]:.4f}")
 
     if plot:
@@ -214,8 +271,9 @@ def exp3(params=None, tlist=None, gamma_scan=None, plot=True):
 
         ax = axes[0]
         for g, col in zip(gamma_scan, cmap):
-            ax.plot(tlist, all_conc[g], color=col, lw=1.8, label=f'γ={g:.1f}')
-        ax.set(xlabel='Time (μs)', ylabel='Concurrence  C',
+            t_g, c_g = all_conc[g]
+            ax.plot(t_g, c_g, color=col, lw=1.8, label=f'γ={g:.1f}')
+        ax.set(xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
                title='Exp.3 — NM → Markovian transition (γ_E scan)',
                ylim=[-0.02, 1.02])
         ax.legend(fontsize=7, ncol=2)
@@ -275,9 +333,10 @@ def exp4(params=None, tlist=None, gamma_zeno_scan=None, plot=True):
 
     for g in gamma_zeno_scan:
         print(f"  γ_E = {g:.2f} ...", end=' ', flush=True)
-        t, _, conc  = evolve_lindblad(params, gamma_E=g, tlist=tlist)
-        all_conc[g] = conc
-        Gc_sim      = fit_decay_rate(np.array(conc), t)
+        t, _, conc        = evolve_lindblad(params, gamma_E=g, tlist=tlist)
+        t_tr, conc_tr     = _trim_to_c_start(conc, t)
+        all_conc[g]       = (t_tr, conc_tr)   # store trimmed pair
+        Gc_sim            = fit_decay_rate(np.array(conc_tr), t_tr)
         Gc_pred     = gamma_c_zeno(g, params)
         Gamma_c_sim.append(Gc_sim)
         Gamma_c_pred.append(Gc_pred)
@@ -293,24 +352,37 @@ def exp4(params=None, tlist=None, gamma_zeno_scan=None, plot=True):
         subset_g = [gamma_zeno_scan[i] for i in idx_show]
         cols_z   = plt.cm.Blues(np.linspace(0.35, 0.95, n_show))
         for g, col in zip(subset_g, cols_z):
-            ax.plot(t, all_conc[g], color=col, lw=1.8, label=f'γ={g:.1f}')
-        ax.set(xlabel='Time (μs)', ylabel='Concurrence  C',
+            t_g, c_g = all_conc[g]
+            ax.plot(t_g, c_g, color=col, lw=1.8, label=f'γ={g:.1f}')
+        ax.set(xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
                title='Exp.4 — Zeno regime: more γ → slower decay',
                ylim=[-0.02, 1.02])
         ax.legend(fontsize=7, ncol=2)
         ax.grid(True)
 
-        # Right panel: all scan points as small dots + Zeno theory curve
+        # Right panel: all scan points as small dots + post-peak data fit
         ax = axes[1]
-        g_sm = np.linspace(0.5, max(gamma_zeno_scan) + 2, 400)
         valid_pairs = [(g, Gc) for g, Gc in zip(gamma_zeno_scan, Gamma_c_sim)
                        if not np.isnan(Gc)]
+        fit_params = None
         if valid_pairs:
-            gv, Gcv = zip(*valid_pairs)
+            gv, Gcv = np.array(list(zip(*valid_pairs)))
             ax.plot(gv, Gcv, 'o', color='steelblue', ms=3, zorder=5,
                     label='Simulation (fitted)')
-        ax.plot(g_sm, [gamma_c_zeno(g, params) for g in g_sm],
-                'r-', lw=2, label=r'$\Omega_{QE}^2/(4\gamma)+\Gamma_0$')
+
+            # Fit A/γ + B to data points strictly after the peak
+            peak_idx = int(np.argmax(Gcv))
+            post_g  = gv[peak_idx + 4:]
+            post_Gc = Gcv[peak_idx + 4:]
+            if len(post_g) >= 2:
+                coeffs = np.polyfit(1.0 / post_g, post_Gc, 1)
+                A_fit, B_fit = float(coeffs[0]), float(coeffs[1])
+                g_fit = np.linspace(0.4, max(gamma_zeno_scan) + 2, 400)
+                ax.plot(g_fit, A_fit / g_fit + B_fit, 'r-', lw=2,
+                        label=r'Post-peak fit: $A/\gamma + B$')
+                fit_params = {'A': A_fit, 'B': B_fit,
+                              'g_min': float(post_g[0]),
+                              'g_max': float(max(gamma_zeno_scan))}
         ax.axhline(Gamma0, color='green', ls='--', lw=1.5,
                    label=f'Γ₀ = {Gamma0:.4f} μs⁻¹')
         ax.set(xlabel='γ_E (rad/μs)', ylabel='Γ_c (μs⁻¹)',
@@ -320,12 +392,29 @@ def exp4(params=None, tlist=None, gamma_zeno_scan=None, plot=True):
         ax.grid(True)
         plt.tight_layout(); plt.show()
 
+    # Compute fit_params outside the plot block so they are always returned
+    if not plot:
+        valid_pairs = [(g, Gc) for g, Gc in zip(gamma_zeno_scan, Gamma_c_sim)
+                       if not np.isnan(Gc)]
+        fit_params = None
+        if valid_pairs:
+            gv, Gcv = np.array(list(zip(*valid_pairs)))
+            peak_idx = int(np.argmax(Gcv))
+            post_g  = gv[peak_idx + 1:]
+            post_Gc = Gcv[peak_idx + 1:]
+            if len(post_g) >= 2:
+                coeffs  = np.polyfit(1.0 / post_g, post_Gc, 1)
+                fit_params = {'A': float(coeffs[0]), 'B': float(coeffs[1]),
+                              'g_min': float(post_g[0]),
+                              'g_max': float(max(gamma_zeno_scan))}
+
     print(f"[Exp.4]  Γ₀ = {Gamma0:.5f} μs⁻¹  (asymptote at large γ)")
     return {
         'gamma_scan'  : gamma_zeno_scan,
         'Gamma_c_sim' : Gamma_c_sim,
         'Gamma_c_zeno': Gamma_c_pred,
         'Gamma0'      : Gamma0,
+        'fit_params'  : fit_params,
     }
 
 
@@ -363,17 +452,22 @@ def plot_full_dashboard(res1, res2, res3, res4, params=None, save_pdf=True):
 
     # ── Panel B: Exp.2 non-Markovian revival ─────────────────────────────────
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(res1['tlist'], res1['conc'],
+    # Align trimmed arrays for overlay (take the shorter length)
+    _n = min(len(res1['conc']), len(res2['conc']))
+    _t_b  = res2['tlist'][:_n]
+    _c1   = np.array(res1['conc'][:_n])
+    _c2   = np.array(res2['conc'][:_n])
+    ax2.plot(_t_b, _c1,
              color='gray', lw=1.2, ls='--', alpha=0.7, label='Baseline')
-    ax2.plot(res2['tlist'], res2['conc'],
+    ax2.plot(_t_b, _c2,
              color='steelblue', lw=2,
              label=f"γ=0  (N = {res2['NM']:.2f})")
-    ax2.fill_between(res2['tlist'],
-                     np.array(res2['conc']), np.array(res1['conc']),
-                     where=np.array(res2['conc']) > np.array(res1['conc']),
+    ax2.fill_between(_t_b, _c2, _c1,
+                     where=_c2 > _c1,
                      alpha=0.3, color='limegreen', label='Revival region')
     ax2.set(title='(B) Exp.2 — Non-Markovian revival',
-            xlabel='Time (μs)', ylabel='Concurrence  C', ylim=[0, 1.05])
+            xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
+            ylim=[0, 1.05])
     ax2.legend(fontsize=8)
     ax2.grid(True)
     ax2.text(0.5, 0.25, f"N = {res2['NM']:.2f}",
@@ -385,29 +479,33 @@ def plot_full_dashboard(res1, res2, res3, res4, params=None, save_pdf=True):
     gamma_plot = [g for g in res3['gamma_scan'] if g <= 5.0]
     cols3      = plt.cm.viridis(np.linspace(0.1, 0.9, len(gamma_plot)))
     for g, col in zip(gamma_plot, cols3):
-        ax3.plot(res3['tlist'], res3['all_conc'][g],
-                 color=col, lw=1.8, label=f'γ={g:.1f}')
+        t_g, c_g = res3['all_conc'][g]
+        ax3.plot(t_g, c_g, color=col, lw=1.8, label=f'γ={g:.1f}')
     ax3.set(title='(C) Exp.3 — NM → Markovian transition',
-            xlabel='Time (μs)', ylabel='Concurrence  C', ylim=[0, 1.05])
+            xlabel=f'Time since C={C_RECORD} (μs)', ylabel='Concurrence  C',
+            ylim=[0, 1.05])
     ax3.legend(fontsize=7, ncol=2)
     ax3.grid(True)
 
     # ── Panel D: Exp.4 Zeno scaling ───────────────────────────────────────────
     ax4 = fig.add_subplot(gs[1, 1])
-    g_sm = np.linspace(0.5, 50, 300)
     valid_pairs = [(g, Gc) for g, Gc in
                    zip(res4['gamma_scan'], res4['Gamma_c_sim'])
                    if not np.isnan(Gc)]
     if valid_pairs:
         gv, Gcv = zip(*valid_pairs)
         ax4.plot(gv, Gcv, 'o', color='steelblue', ms=3, label='Simulation')
-    ax4.plot(g_sm, [gamma_c_zeno(g, params) for g in g_sm],
-             'r-', lw=2, label=r'$\Omega_{QE}^2/(4\gamma)+\Gamma_0$')
+    fp = res4.get('fit_params')
+    if fp is not None:
+        g_fit = np.linspace(fp['g_min'], fp['g_max'] + 2, 300)
+        ax4.plot(g_fit, fp['A'] / g_fit + fp['B'], 'r-', lw=2,
+                 label=r'Post-peak fit: $A/\gamma + B$')
     ax4.axhline(res4['Gamma0'], color='green', ls='--', lw=1.5,
                 label=f"Γ₀={res4['Gamma0']:.4f}")
     ax4.set(title='(D) Exp.4 — Zeno scaling',
             xlabel='γ_E (rad/μs)', ylabel='Γ_c (μs⁻¹)')
     ax4.legend(fontsize=8)
+    ax4.set_xscale('log')
     ax4.grid(True)
 
     plt.suptitle(

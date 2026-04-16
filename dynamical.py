@@ -70,9 +70,17 @@ def build_c_ops(params, gamma_E=0.0):
     """
     T2Q = params.get("T2Q", DEFAULT_PARAMS["T2Q"])
     T2A = params.get("T2A", DEFAULT_PARAMS["T2A"])
+    T2E = params.get("T2E", DEFAULT_PARAMS["T2E"])
+    T1A = params.get("T1A", DEFAULT_PARAMS["T1A"])
+    T1Q = params.get("T1Q", DEFAULT_PARAMS["T1Q"])
+    T1E = params.get("T1E", DEFAULT_PARAMS["T1E"])
     ops = [
-        np.sqrt(1.0 / T2Q) * Q(sz),   # Q pure dephasing
-        np.sqrt(1.0 / T2A) * A(sz),   # A pure dephasing
+        np.sqrt(1.0 / (2*T2Q)) * Q(sz),   # Q pure dephasing
+        np.sqrt(1.0 / (2*T2A)) * A(sz),   # A pure dephasing
+        np.sqrt(1.0 / (2*T2E)) * E(sz),   
+        np.sqrt(1.0 / T1Q) * Q(s_minus),
+        np.sqrt(1.0 / T1A) * A(s_minus),
+        np.sqrt(1.0 / T1E) * E(s_minus)
     ]
     if gamma_E > 0.0:
         ops.append(np.sqrt(gamma_E) * E(sz))

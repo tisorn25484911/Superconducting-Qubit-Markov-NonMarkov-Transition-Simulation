@@ -31,6 +31,10 @@ DEFAULT_PARAMS = {
     # Coherence times (μs)
     "T2Q"   : 39.0,
     "T2A"   : 41.0,
+    "T2E"   : 38.0,
+    "T1A"   : 32.0,
+    "T1Q"   : 31.0,
+    "T1E"   : 28.0,
     # iSWAP coupling rates (rad/μs = 2π × MHz)
     "Om_QA" : 2 * np.pi * 0.477,   # Q-A  (2π × 0.477 MHz)
     "Om_QE" : 2 * np.pi * 0.473,   # Q-E  (2π × 0.473 MHz)
@@ -56,11 +60,11 @@ DEFAULT_PARAMS = {
     # To enable H_lab_parametric, increase both detunings so Δ/g_bare > 50:
     #   "delta_QA": 2*np.pi*50,  "om_Q": 2*np.pi*200, "om_A": 2*np.pi*150
     # (requires nsteps ≥ 100 000 and longer run times).
-    "delta_QA" : 2 * np.pi * (4.55 - 4.2),   # 0.35 MHz — too small for H_lab_parametric
-    "delta_QE" : 2 * np.pi * (4.55 - 4.08),  # 0.47 MHz — too small for H_lab_parametric
-    "om_Q"  : 2 * np.pi * 4.55,   # rad/μs  (NOTE: GHz numeral used as MHz value)
-    "om_A"  : 2 * np.pi * 4.200,
-    "om_E"  : 2 * np.pi * 4.08,
+    "delta_QA" : 2 * np.pi * (4.55 - 4.2)*1000,   # 0.35 MHz — too small for H_lab_parametric
+    "delta_QE" : 2 * np.pi * (4.55 - 4.08)*1000,  # 0.47 MHz — too small for H_lab_parametric
+    "om_Q"  : 2 * np.pi * 4.65*1000,   # rad/μs  (NOTE: GHz numeral used as MHz value)
+    "om_A"  : 2 * np.pi * 4.200*1000,
+    "om_E"  : 2 * np.pi * 5.37*1000,
     # Approximation degree selector
     "aprox_deg" : 0,
 }
@@ -107,18 +111,18 @@ def H_free(params):
 def H_QA_int(params):
     """Q-A iSWAP coupling: Ω_QA (σ+^Q σ-^A + σ-^Q σ+^A)"""
     Om = params.get("Om_QA", DEFAULT_PARAMS["Om_QA"])
-    return Om * (qt.tensor(s_plus, s_minus, I) + qt.tensor(s_minus, s_plus, I))
+    return Om/2 * (qt.tensor(s_plus, s_minus, I) + qt.tensor(s_minus, s_plus, I))
 
 
 def H_QE_int(params):
     """Q-E iSWAP coupling: Ω_QE (σ+^Q σ-^E + σ-^Q σ+^E)"""
     Om = params.get("Om_QE", DEFAULT_PARAMS["Om_QE"])
-    return Om * (qt.tensor(s_plus, I, s_minus) + qt.tensor(s_minus, I, s_plus))
+    return Om/2 * (qt.tensor(s_plus, I, s_minus) + qt.tensor(s_minus, I, s_plus))
 
 
 def H_interaction(params):
     """Pure interaction Hamiltonian (used in aprox_deg = 0, RWA / interaction picture)."""
-    return H_QA_int(params) + H_QE_int(params)
+    return  H_QE_int(params) #+ H_QA_int(params) 
 
 
 def H_detuning(params):
@@ -135,13 +139,6 @@ def H_detuning(params):
     The sign convention is:
       - Q acquires a negative shift from both pairs (it is the "upper" qubit)
       - A and E each acquire a positive shift from their respective pair
-
-    NOTE: The earlier implementation used ±Δ/2, which is the residual in a plain
-    single-rotating frame — NOT the correct correction in the doubly-rotating
-    parametric-modulation frame.  That expression is valid only if Δ >> Ω, in
-    which case it describes the qubit precession relative to the modulation drive,
-    but it is not a small correction and wrongly distorts the iSWAP dynamics when
-    Δ ~ Ω (the current parameter regime).
     """
     delta_QA = params.get("delta_QA", DEFAULT_PARAMS["delta_QA"])
     delta_QE = params.get("delta_QE", DEFAULT_PARAMS["delta_QE"])
@@ -464,14 +461,15 @@ def sqrt_iSWAP_gate():
 #  Non-Markovianity measure  (Rivas-Huelga-Plenio)
 # ──────────────────────────────────────────────────────────────────────────────
 def nm_measure(conc_list, tlist):
-    """
-    RHP non-Markovianity: N = ∫ max(dC/dt, 0) dt
-    Returns N > 0 iff dynamics cannot be CPTP (= proof of non-Markovianity).
-    """
-    C  = np.array(conc_list)
-    dt = tlist[1] - tlist[0]
-    dC = np.gradient(C, dt)
-    return float(trapezoid(np.where(dC > 0, dC, 0), tlist))
+    C = np.asarray(conc_list, dtype=float)
+    t = np.asarray(tlist, dtype=float)
+
+    dC = np.gradient(C, t)
+
+    integral = trapezoid(np.abs(dC), t)
+    deltaC = C[-1] - C[0]
+
+    return float(integral + deltaC)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
