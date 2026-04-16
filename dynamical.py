@@ -40,7 +40,7 @@ warnings.filterwarnings('ignore')
 
 from state_prep import (
     Q, A, E, sx, sy, sz, s_plus, s_minus,
-    H_for_simulation, DEFAULT_PARAMS,
+    H_for_simulation, H_lab_parametric, DEFAULT_PARAMS,
     prepare_initial_state, nm_measure,
 )
 
@@ -104,14 +104,35 @@ def evolve_lindblad(params, gamma_E=0.0, tlist=None, rho0=None):
     if rho0 is None:
         rho0 = prepare_initial_state(params)
 
-    H     = H_for_simulation(params)
     c_ops = build_c_ops(params, gamma_E)
+    deg   = params.get("aprox_deg", 0)
 
-    result = qt.mesolve(
-        H=H, rho0=rho0, tlist=tlist,
-        c_ops=c_ops, e_ops=[],
-        options={'nsteps': 8000, 'atol': 1e-9, 'rtol': 1e-7},
-    )
+    if deg == 1:
+        # Doubly-rotating frame: H = H_interaction + H_detuning.
+        #
+        # NOTE: H_lab_parametric (lab-frame parametric modulation) is NOT used here
+        # because the Jacobi-Anger RWA requires Δ >> g_bare >> 1/T_sim.  With the
+        # current frequency parameters (Δ_QA/(2π) = 0.35 MHz, g_bare/(2π) ≈ 0.98 MHz)
+        # the hierarchy is inverted (g_bare/ω_m ≈ 5.6 >> 1), so all Bessel sidebands
+        # are near-resonant and the RWA fails entirely.  The doubly-rotating-frame
+        # Hamiltonian (H_for_simulation) gives correct physics at this approximation
+        # level; H_lab_parametric can only be used when the lab-frame detunings satisfy
+        # Δ/(2π) >> g_bare/(2π) (requires rescaling delta_QA/delta_QE to >> 10 MHz).
+        H = H_for_simulation(params)
+        result = qt.mesolve(
+            H=H, rho0=rho0, tlist=tlist,
+            c_ops=c_ops, e_ops=[],
+            options={'nsteps': 8000, 'atol': 1e-9, 'rtol': 1e-7},
+        )
+    else:
+        # Interaction picture / RWA (time-independent, default)
+        H = H_for_simulation(params)
+        result = qt.mesolve(
+            H=H, rho0=rho0, tlist=tlist,
+            c_ops=c_ops, e_ops=[],
+            options={'nsteps': 8000, 'atol': 1e-9, 'rtol': 1e-7},
+        )
+
     conc = [qt.concurrence(s.ptrace([0, 1])) for s in result.states]
     return np.array(tlist), result.states, conc
 

@@ -316,6 +316,7 @@ def exp4(params=None, tlist=None, gamma_zeno_scan=None, plot=True):
         ax.set(xlabel='γ_E (rad/μs)', ylabel='Γ_c (μs⁻¹)',
                title='Zeno scaling of concurrence decay rate')
         ax.legend(fontsize=9)
+        ax.set_xscale('log')
         ax.grid(True)
         plt.tight_layout(); plt.show()
 

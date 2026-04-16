@@ -43,7 +43,7 @@ from experiment import exp1, exp2, exp3, exp4, plot_full_dashboard
 #  Parameters
 # ──────────────────────────────────────────────────────────────────────────────
 PARAMS = DEFAULT_PARAMS.copy()
-PARAMS["aprox_deg"] = 0   # interaction picture — exact paper reproduction
+PARAMS["aprox_deg"] = 1   # interaction picture — exact paper reproduction
 
 # Shared time axis for Experiments 1-3 (μs)
 TLIST = np.linspace(0, 10, 400)
@@ -52,7 +52,7 @@ TLIST = np.linspace(0, 10, 400)
 GAMMA_SCAN     = [0.0, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
 
 # gamma_E values for Exp.4 (Zeno regime)
-GAMMA_ZENO_SCAN = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5,  5.0, 5.5, 6.0, 6.5, 7.0, 8.0, 9.0, 10.0, 12.0, 15.0,  20.0, 25.0, 30.0, 35.0, 45.5]
+GAMMA_ZENO_SCAN = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5,  5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 11,  12.0, 13.5, 15.0,  20.0, 25.0, 30.0, 35.0, 45.5]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

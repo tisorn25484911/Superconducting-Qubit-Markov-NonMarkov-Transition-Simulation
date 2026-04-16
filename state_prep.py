@@ -22,6 +22,7 @@ import qutip as qt
 import pennylane as qml
 from scipy.linalg import expm
 from scipy.integrate import trapezoid
+from scipy.special import jn as bessel_jn
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Default physical parameters   (Table I  +  text of Gaikwad et al.)
@@ -35,12 +36,31 @@ DEFAULT_PARAMS = {
     "Om_QE" : 2 * np.pi * 0.473,   # Q-E  (2π × 0.473 MHz)
     # Dispersive coupling chi/2π = 200 kHz
     "chi"   : 2 * np.pi * 0.200,
-    # Qubit transition frequencies for aprox_deg = 1
-    # Values scaled so 1 "scaled-GHz" = 1 rad/μs (allows finite-step integration)
-    # Physically these represent ~4.1 GHz transmon qubits.
-    "om_Q"  : 2 * np.pi * 4.100,   # rad/μs  (scaled: 4.100 "GHz")
-    "om_A"  : 2 * np.pi * 4.100,   # will be shifted by Om_QA in H_free
-    "om_E"  : 2 * np.pi * 4.100,   # will be shifted by -Om_QE in H_free
+    # Qubit transition frequencies for aprox_deg = 1.
+    #
+    # *** IMPORTANT — frequency scale constraint for H_lab_parametric ***
+    # The parametric-modulation (Jacobi-Anger) scheme requires:
+    #
+    #   g_bare  <<  ω_m  <<  Δ
+    #
+    # where g_bare = Ω_QA / J_2(β) ≈ 0.98 MHz and ω_m = Δ_QA / 2.
+    # This means Δ_QA must be >> 0.98 MHz.
+    #
+    # Current values (below) give Δ_QA = 0.35 MHz < g_bare — the RWA is
+    # completely invalid and H_lab_parametric produces unphysical rapid
+    # Rabi oscillations (~1 µs period) with N ≈ 15.
+    #
+    # These values ARE used for H_detuning (AC Stark shift corrections),
+    # which only requires Δ to be non-zero, not large.
+    #
+    # To enable H_lab_parametric, increase both detunings so Δ/g_bare > 50:
+    #   "delta_QA": 2*np.pi*50,  "om_Q": 2*np.pi*200, "om_A": 2*np.pi*150
+    # (requires nsteps ≥ 100 000 and longer run times).
+    "delta_QA" : 2 * np.pi * (4.55 - 4.2),   # 0.35 MHz — too small for H_lab_parametric
+    "delta_QE" : 2 * np.pi * (4.55 - 4.08),  # 0.47 MHz — too small for H_lab_parametric
+    "om_Q"  : 2 * np.pi * 4.55,   # rad/μs  (NOTE: GHz numeral used as MHz value)
+    "om_A"  : 2 * np.pi * 4.200,
+    "om_E"  : 2 * np.pi * 4.08,
     # Approximation degree selector
     "aprox_deg" : 0,
 }
@@ -69,16 +89,16 @@ def H_free(params):
     """
     Free (lab-frame) Hamiltonian for aprox_deg = 1.
 
-    We set  ω_A = ω_Q + Δ_QA  and  ω_E = ω_Q − Δ_QE  so the natural
-    detunings match the iSWAP coupling frequencies from the paper.
+    Both A and E sit below Q:
+      ω_A = ω_Q − Δ_QA,   ω_E = ω_Q − Δ_QE
 
     H_0 = ω_Q σ_z^Q/2 + ω_A σ_z^A/2 + ω_E σ_z^E/2
     """
     om_Q  = params.get("om_Q",  DEFAULT_PARAMS["om_Q"])
-    Om_QA = params.get("Om_QA", DEFAULT_PARAMS["Om_QA"])
-    Om_QE = params.get("Om_QE", DEFAULT_PARAMS["Om_QE"])
-    om_A  = om_Q + Om_QA    # detuned so Δ_QA = Om_QA
-    om_E  = om_Q - Om_QE    # detuned so Δ_QE = Om_QE
+    delta_QA = params.get("delta_QA", DEFAULT_PARAMS["delta_QA"])
+    delta_QE = params.get("delta_QE", DEFAULT_PARAMS["delta_QE"])
+    om_A  = om_Q - delta_QA    # A below Q: Δ_QA = om_Q - om_A
+    om_E  = om_Q - delta_QE    # E below Q: Δ_QE = om_Q - om_E
     return (om_Q * Q(sz) / 2.0 +
             om_A * A(sz) / 2.0 +
             om_E * E(sz) / 2.0)
@@ -103,23 +123,39 @@ def H_interaction(params):
 
 def H_detuning(params):
     """
-    Residual detuning terms for aprox_deg = 1 (doubly-rotating frame).
+    Leading-order correction to the RWA for aprox_deg = 1 (doubly-rotating frame).
 
-    Drive frequencies:  ω_d_QA = Δ_QA/2,   ω_d_QE = Δ_QE/4
-    In the frame rotating at ω_d for each pair, the residual detuning is
-    δ_i = ω_i − ω_drive projected onto each qubit.
+    After the Jacobi-Anger expansion and RWA, the dominant residual correction is
+    the AC Stark (dispersive) shift from the off-resonant Bessel sidebands:
 
-    Concretely:
-      δ_Q_QA = −Δ_QA/2,  δ_A_QA = +Δ_QA/2   (for Q-A drive)
-      δ_Q_QE = −Δ_QE/4,  δ_E_QE = +Δ_QE/4   (for Q-E drive)
-    Combined on Q:  δ_Q = −Δ_QA/2 − Δ_QE/4
+        χ_QA = Ω_QA² / Δ_QA   (Q-A dispersive shift, rad/μs)
+        χ_QE = Ω_QE² / Δ_QE   (Q-E dispersive shift)
+
+    These are of order Ω²/Δ and vanish in the Δ → ∞ limit (recovering aprox_deg=0).
+    The sign convention is:
+      - Q acquires a negative shift from both pairs (it is the "upper" qubit)
+      - A and E each acquire a positive shift from their respective pair
+
+    NOTE: The earlier implementation used ±Δ/2, which is the residual in a plain
+    single-rotating frame — NOT the correct correction in the doubly-rotating
+    parametric-modulation frame.  That expression is valid only if Δ >> Ω, in
+    which case it describes the qubit precession relative to the modulation drive,
+    but it is not a small correction and wrongly distorts the iSWAP dynamics when
+    Δ ~ Ω (the current parameter regime).
     """
-    Om_QA = params.get("Om_QA", DEFAULT_PARAMS["Om_QA"])
-    Om_QE = params.get("Om_QE", DEFAULT_PARAMS["Om_QE"])
-    # Drive frequencies (plan: ω_drive = Δ/2 for QA, Δ/4 for QE)
-    dQ = -Om_QA / 2.0 - Om_QE / 4.0
-    dA = +Om_QA / 2.0
-    dE = +Om_QE / 4.0
+    delta_QA = params.get("delta_QA", DEFAULT_PARAMS["delta_QA"])
+    delta_QE = params.get("delta_QE", DEFAULT_PARAMS["delta_QE"])
+    Om_QA    = params.get("Om_QA",    DEFAULT_PARAMS["Om_QA"])
+    Om_QE    = params.get("Om_QE",    DEFAULT_PARAMS["Om_QE"])
+
+    # AC Stark shifts (dispersive correction, order Ω²/Δ)
+    chi_QA = Om_QA**2 / delta_QA if abs(delta_QA) > 1e-12 else 0.0
+    chi_QE = Om_QE**2 / delta_QE if abs(delta_QE) > 1e-12 else 0.0
+
+    dQ = -(chi_QA + chi_QE) / 4.0   # Q shifts down from both pairs
+    dA = +chi_QA / 4.0               # A shifts up from Q-A pair
+    dE = +chi_QE / 4.0               # E shifts up from Q-E pair
+
     return (dQ * Q(sz) / 2.0 +
             dA * A(sz) / 2.0 +
             dE * E(sz) / 2.0)
@@ -141,6 +177,106 @@ def H_for_simulation(params):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Parametric modulation — lab-frame time-dependent Hamiltonian (aprox_deg = 1)
+# ──────────────────────────────────────────────────────────────────────────────
+def _bessel_scale(params):
+    """
+    Compute modulation parameters so the effective parametric coupling matches
+    the paper values exactly.
+
+    Physics (Gaikwad et al., Supplemental):
+      Q-A: Q flux driven at ω_m = Δ_QA/2.
+           Phase accumulated: Δ_QA·t + (ε/ω_m)·sin(ω_m·t).
+           Jacobi-Anger: effective coupling = g_bare · J_2(ε/ω_m).
+           → Choose β_QA = ε_QA/ω_m at the J_2 first maximum (β≈3.054).
+           → Rescale g_bare = Ω_QA / J_2(β_QA) so g_bare·J_2 = Ω_QA exactly.
+
+      Q-E: Q and E both driven anti-phase at ω_m = Δ_QE/4.
+           Differential modulation amplitude is 2ε, so β' = 2ε/ω_m.
+           Effective coupling = g_bare · J_4(β').
+           → Choose β' at J_4 first maximum (β'≈5.318).
+           → Rescale g_bare = Ω_QE / J_4(β').
+
+    Returns dict with wm_QA, wm_QE, eps_QA, eps_QE, g_QA_bare, g_QE_bare.
+    """
+    delta_QA = params.get("delta_QA", DEFAULT_PARAMS["delta_QA"])
+    delta_QE = params.get("delta_QE", DEFAULT_PARAMS["delta_QE"])
+    Om_QA    = params.get("Om_QA",    DEFAULT_PARAMS["Om_QA"])
+    Om_QE    = params.get("Om_QE",    DEFAULT_PARAMS["Om_QE"])
+
+    wm_QA = abs(delta_QA) / 2.0   # modulation freq for Q-A
+    wm_QE = abs(delta_QE) / 4.0   # modulation freq for Q-E
+
+    # Optimal modulation indices at first maximum of J_n
+    beta_QA = 3.0542    # argmax J_2;  J_2(3.054) ≈ 0.4865
+    beta_QE = 5.3175    # argmax J_4 in terms of β'=2ε/ω_m;  J_4(5.318) ≈ 0.3912
+
+    eps_QA  = beta_QA * wm_QA           # ε_QA = β · ω_m
+    eps_QE  = beta_QE * wm_QE / 2.0    # β' = 2ε/ω_m → ε = β'·ω_m/2
+
+    j2 = float(bessel_jn(2, beta_QA))  # ≈ 0.4865
+    j4 = float(bessel_jn(4, beta_QE))  # ≈ 0.3912
+
+    return dict(
+        wm_QA     = wm_QA,
+        wm_QE     = wm_QE,
+        eps_QA    = eps_QA,
+        eps_QE    = eps_QE,
+        g_QA_bare = Om_QA / j2,
+        g_QE_bare = Om_QE / j4,
+        j2=j2, j4=j4,
+    )
+
+
+def H_lab_parametric(params):
+    """
+    Full lab-frame time-dependent Hamiltonian with parametric modulation.
+    Used by evolve_lindblad when aprox_deg = 1.
+
+    Returns (H_list, args) ready for qt.mesolve(H_list, ..., args=args).
+
+    Structure:
+      H(t) = H_free
+            + g_QA_bare (σ+_Q σ-_A + h.c.)          [bare Q-A exchange]
+            + g_QE_bare (σ+_Q σ-_E + h.c.)          [bare Q-E exchange]
+            + [ε_QA cos(ω_m_QA t) + ε_QE cos(ω_m_QE t)] · σ_z^Q/2   [Q flux drive]
+            + [−ε_QE cos(ω_m_QE t)]                 · σ_z^E/2        [E flux drive, anti-phase]
+
+    The two drives on Q create:
+      - J_2 resonance at Δ_QA  (from ε_QA at ω_m_QA = Δ_QA/2)
+      - J_4 resonance at Δ_QE  (from ε_QE at ω_m_QE = Δ_QE/4, anti-phase with E)
+    """
+    bp = _bessel_scale(params)
+
+    H_static = (
+        H_free(params)
+        + bp['g_QA_bare'] * (qt.tensor(s_plus, s_minus, I) + qt.tensor(s_minus, s_plus, I))
+        + bp['g_QE_bare'] * (qt.tensor(s_plus, I, s_minus) + qt.tensor(s_minus, I, s_plus))
+    )
+
+    H_Q_mod = Q(sz) / 2.0   # Q flux operator
+    H_E_mod = E(sz) / 2.0   # E flux operator (anti-phase, Q-E drive only)
+
+    def _c_Q(t, args):
+        """Q modulation: both drives act on Q's σ_z."""
+        return (args['eps_QA'] * np.cos(args['wm_QA'] * t)
+              + args['eps_QE'] * np.cos(args['wm_QE'] * t))
+
+    def _c_E(t, args):
+        """E modulation: anti-phase with Q-E drive."""
+        return -args['eps_QE'] * np.cos(args['wm_QE'] * t)
+
+    H_list = [H_static, [H_Q_mod, _c_Q], [H_E_mod, _c_E]]
+    args   = {
+        'eps_QA': bp['eps_QA'],
+        'eps_QE': bp['eps_QE'],
+        'wm_QA' : bp['wm_QA'],
+        'wm_QE' : bp['wm_QE'],
+    }
+    return H_list, args
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Frame transformations  (rotating ↔ stationary lab frame)
 # ──────────────────────────────────────────────────────────────────────────────
 def _U0(params, t):
@@ -149,11 +285,11 @@ def _U0(params, t):
     Used to transform between the doubly-rotating frame and a reference frame
     in which the qubit operators are stationary.
     """
-    Om_QA = params.get("Om_QA", DEFAULT_PARAMS["Om_QA"])
-    Om_QE = params.get("Om_QE", DEFAULT_PARAMS["Om_QE"])
-    dQ = -Om_QA / 2.0 - Om_QE / 4.0
-    dA = +Om_QA / 2.0
-    dE = +Om_QE / 4.0
+    delta_QA = params.get("delta_QA", DEFAULT_PARAMS["delta_QA"])
+    delta_QE = params.get("delta_QE", DEFAULT_PARAMS["delta_QE"])
+    dQ = -delta_QA / 2.0 - delta_QE / 4.0
+    dA = +delta_QA / 2.0
+    dE = +delta_QE / 4.0
     # Individual rotations exp(−i δ σ_z t / 2)
     Uq = qt.Qobj(expm(-1j * dQ * sz.full() * t / 2.0))
     Ua = qt.Qobj(expm(-1j * dA * sz.full() * t / 2.0))
