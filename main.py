@@ -43,7 +43,7 @@ from experiment import exp1, exp2, exp3, exp4, plot_full_dashboard
 #  Parameters
 # ──────────────────────────────────────────────────────────────────────────────
 PARAMS = DEFAULT_PARAMS.copy()
-PARAMS["aprox_deg"] = 1   # interaction picture — exact paper reproduction
+PARAMS["aprox_deg"] = 0   # interaction picture — exact paper reproduction
 
 # Shared time axis for Experiments 1-3 (μs)
 TLIST = np.linspace(0, 10, 400)
